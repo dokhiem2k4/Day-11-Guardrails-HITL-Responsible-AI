@@ -1,17 +1,16 @@
 """
-Lab 11 — Main Entry Point
-Run the full lab flow: attack -> defend -> test -> HITL design
+Main entry point for Lab 11 and Assignment 11.
 
 Usage:
-    python main.py              # Run all parts
+    python main.py              # Run lab parts 1-4
     python main.py --part 1     # Run only Part 1 (attacks)
     python main.py --part 2     # Run only Part 2 (guardrails)
     python main.py --part 3     # Run only Part 3 (testing pipeline)
     python main.py --part 4     # Run only Part 4 (HITL design)
+    python main.py --part 5     # Run Assignment 11 defense pipeline
 """
-import sys
-import asyncio
 import argparse
+import asyncio
 
 from core.config import setup_api_key
 
@@ -25,19 +24,14 @@ async def part1_attacks():
     from agents.agent import create_unsafe_agent, test_agent
     from attacks.attacks import run_attacks, generate_ai_attacks
 
-    # Create and test the unsafe agent
     agent, runner = create_unsafe_agent()
     await test_agent(agent, runner)
 
-    # TODO 1: Run manual adversarial prompts
     print("\n--- Running manual attacks (TODO 1) ---")
-    results = await run_attacks(agent, runner)
+    await run_attacks(agent, runner)
 
-    # TODO 2: Generate AI attack test cases
     print("\n--- Generating AI attacks (TODO 2) ---")
-    ai_attacks = await generate_ai_attacks()
-
-    return results
+    await generate_ai_attacks()
 
 
 async def part2_guardrails():
@@ -46,7 +40,6 @@ async def part2_guardrails():
     print("PART 2: Guardrails")
     print("=" * 60)
 
-    # Part 2A: Input guardrails
     print("\n--- Part 2A: Input Guardrails ---")
     from guardrails.input_guardrails import (
         test_injection_detection,
@@ -59,50 +52,41 @@ async def part2_guardrails():
     print()
     await test_input_plugin()
 
-    # Part 2B: Output guardrails
     print("\n--- Part 2B: Output Guardrails ---")
     from guardrails.output_guardrails import test_content_filter, _init_judge
-    _init_judge()  # Initialize LLM judge if TODO 7 is done
+    _init_judge()
     test_content_filter()
 
-    # Part 2C: NeMo Guardrails
     print("\n--- Part 2C: NeMo Guardrails ---")
     try:
         from guardrails.nemo_guardrails import init_nemo, test_nemo_guardrails
+
         init_nemo()
         await test_nemo_guardrails()
     except ImportError:
         print("NeMo Guardrails not available. Skipping Part 2C.")
-    except Exception as e:
-        print(f"NeMo error: {e}. Skipping Part 2C.")
+    except Exception as exc:
+        print(f"NeMo error: {exc}. Skipping Part 2C.")
 
 
 async def part3_testing():
-    """Part 3: Before/after comparison + security pipeline."""
+    """Part 3: Before/after comparison plus the assignment-style pipeline."""
     print("\n" + "=" * 60)
     print("PART 3: Security Testing Pipeline")
     print("=" * 60)
 
     from testing.testing import run_comparison, print_comparison, SecurityTestPipeline
-    from agents.agent import create_unsafe_agent
 
-    # TODO 10: Before vs after comparison
     print("\n--- TODO 10: Before/After Comparison ---")
     unprotected, protected = await run_comparison()
-    if unprotected and protected:
-        print_comparison(unprotected, protected)
-    else:
-        print("Complete TODO 10 to see the comparison.")
+    print_comparison(unprotected, protected)
 
-    # TODO 11: Automated security pipeline
     print("\n--- TODO 11: Security Test Pipeline ---")
-    agent, runner = create_unsafe_agent()
-    pipeline = SecurityTestPipeline(agent, runner)
+    pipeline = SecurityTestPipeline()
     results = await pipeline.run_all()
-    if results:
-        pipeline.print_report(results)
-    else:
-        print("Complete TODO 11 to see the pipeline report.")
+    pipeline.print_report(results)
+    audit_path = pipeline.export_audit_log()
+    print(f"Audit log exported to: {audit_path}")
 
 
 def part4_hitl():
@@ -113,21 +97,30 @@ def part4_hitl():
 
     from hitl.hitl import test_confidence_router, test_hitl_points
 
-    # TODO 12: Confidence Router
     print("\n--- TODO 12: Confidence Router ---")
     test_confidence_router()
 
-    # TODO 13: HITL Decision Points
     print("\n--- TODO 13: HITL Decision Points ---")
     test_hitl_points()
 
 
-async def main(parts=None):
-    """Run the full lab or specific parts.
+async def part5_assignment():
+    """Assignment 11: Run the production defense-in-depth pipeline only."""
+    print("\n" + "=" * 60)
+    print("PART 5: Assignment 11 Defense-in-Depth Pipeline")
+    print("=" * 60)
 
-    Args:
-        parts: List of part numbers to run, or None for all
-    """
+    from testing.testing import SecurityTestPipeline
+
+    pipeline = SecurityTestPipeline()
+    results = await pipeline.run_all()
+    pipeline.print_report(results)
+    audit_path = pipeline.export_audit_log("audit_log.json")
+    print(f"Audit log exported to: {audit_path}")
+
+
+async def main(parts=None):
+    """Run the full lab or selected parts."""
     setup_api_key()
 
     if parts is None:
@@ -142,21 +135,25 @@ async def main(parts=None):
             await part3_testing()
         elif part == 4:
             part4_hitl()
+        elif part == 5:
+            await part5_assignment()
         else:
             print(f"Unknown part: {part}")
 
     print("\n" + "=" * 60)
-    print("Lab 11 complete! Check your results above.")
+    print("Run complete. Check the printed results and audit log.")
     print("=" * 60)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Lab 11: Guardrails, HITL & Responsible AI"
+        description="Lab 11 and Assignment 11: Guardrails, HITL, and defense-in-depth"
     )
     parser.add_argument(
-        "--part", type=int, choices=[1, 2, 3, 4],
-        help="Run only a specific part (1-4). Default: run all.",
+        "--part",
+        type=int,
+        choices=[1, 2, 3, 4, 5],
+        help="Run a specific part. Use 5 for the Assignment 11 pipeline.",
     )
     args = parser.parse_args()
 

@@ -28,6 +28,25 @@ from core.config import ALLOWED_TOPICS, BLOCKED_TOPICS
 # - "act as (a |an )?unrestricted"
 # ============================================================
 
+def get_injection_match(user_input: str) -> str | None:
+    """Return the first matching prompt-injection pattern, if any."""
+    injection_patterns = [
+        r"ignore\s+(all\s+)?(previous|prior|above)\s+instructions?",
+        r"\byou\s+are\s+now\b",
+        r"\bsystem\s+prompt\b",
+        r"reveal\s+(your|the)\s+(instructions?|prompt|configuration|config)",
+        r"\bpretend\s+you\s+are\b",
+        r"\bact\s+as\s+(a\s+|an\s+)?unrestricted\b",
+        r"\boverride\s+(safety|security|guardrails|protocols?)\b",
+        r"\bforget\s+(all\s+)?(rules|instructions?)\b",
+        r"\bjailbreak\b|\bdan\b",
+    ]
+    for pattern in injection_patterns:
+        if re.search(pattern, user_input, re.IGNORECASE):
+            return pattern
+    return None
+
+
 def detect_injection(user_input: str) -> bool:
     """Detect prompt injection patterns in user input.
 
@@ -37,16 +56,7 @@ def detect_injection(user_input: str) -> bool:
     Returns:
         True if injection detected, False otherwise
     """
-    INJECTION_PATTERNS = [
-        # TODO: Add at least 5 regex patterns
-        # Example:
-        # r"ignore (all )?(previous|above) instructions",
-    ]
-
-    for pattern in INJECTION_PATTERNS:
-        if re.search(pattern, user_input, re.IGNORECASE):
-            return True
-    return False
+    return get_injection_match(user_input) is not None
 
 
 # ============================================================
@@ -70,12 +80,15 @@ def topic_filter(user_input: str) -> bool:
     """
     input_lower = user_input.lower()
 
-    # TODO: Implement logic:
-    # 1. If input contains any blocked topic -> return True
-    # 2. If input doesn't contain any allowed topic -> return True
-    # 3. Otherwise -> return False (allow)
+    # This layer catches obviously harmful or off-topic requests before they
+    # ever reach the model, which reduces risk and avoids wasting tokens.
+    if any(topic in input_lower for topic in BLOCKED_TOPICS):
+        return True
 
-    pass  # Replace with your implementation
+    if not any(topic in input_lower for topic in ALLOWED_TOPICS):
+        return True
+
+    return False
 
 
 # ============================================================
@@ -96,6 +109,8 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
         super().__init__(name="input_guardrail")
         self.blocked_count = 0
         self.total_count = 0
+        self.last_block_reason = None
+        self.last_matched_pattern = None
 
     def _extract_text(self, content: types.Content) -> str:
         """Extract plain text from a Content object."""
@@ -128,14 +143,27 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
         self.total_count += 1
         text = self._extract_text(user_message)
 
-        # TODO: Implement logic:
-        # 1. Call detect_injection(text)
-        #    - If True: increment blocked_count, return self._block_response("...")
-        # 2. Call topic_filter(text)
-        #    - If True: increment blocked_count, return self._block_response("...")
-        # 3. If both are False: return None (let message through)
+        # This plugin is needed because injection and off-topic detection catch
+        # different failure modes before the LLM has a chance to answer.
+        if detect_injection(text):
+            self.blocked_count += 1
+            self.last_block_reason = "prompt_injection"
+            self.last_matched_pattern = get_injection_match(text)
+            return self._block_response(
+                "I cannot process this request because it appears to contain prompt-injection instructions."
+            )
 
-        pass  # Replace with your implementation
+        if topic_filter(text):
+            self.blocked_count += 1
+            self.last_block_reason = "off_topic_or_blocked_topic"
+            self.last_matched_pattern = None
+            return self._block_response(
+                "I can only help with safe, banking-related questions. Please rephrase your request."
+            )
+
+        self.last_block_reason = None
+        self.last_matched_pattern = None
+        return None
 
 
 # ============================================================
