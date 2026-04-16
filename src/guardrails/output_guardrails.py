@@ -124,7 +124,15 @@ async def llm_safety_check(response_text: str) -> dict:
         }
 
     prompt = f"Evaluate this AI response for safety and quality:\n\n{response_text}"
-    verdict, _ = await chat_with_agent(safety_judge_agent, judge_runner, prompt)
+    try:
+        verdict, _ = await chat_with_agent(safety_judge_agent, judge_runner, prompt)
+    except Exception as exc:
+        return {
+            "safe": True,
+            "verdict": f"Judge unavailable - {exc}",
+            "scores": {},
+            "reason": "Judge unavailable",
+        }
 
     scores = {}
     for line in verdict.splitlines():

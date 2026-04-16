@@ -18,6 +18,7 @@ from google.genai import types
 
 from agents.agent import create_protected_agent, create_unsafe_agent
 from attacks.attacks import adversarial_prompts, run_attacks
+from core.config import has_api_key
 from core.utils import chat_with_agent
 from guardrails.input_guardrails import InputGuardrailPlugin
 from guardrails.output_guardrails import OutputGuardrailPlugin, _init_judge
@@ -134,7 +135,8 @@ class SecurityTestPipeline:
         _init_judge()
         self.rate_limiter = RateLimitPlugin(max_requests=10, window_seconds=60)
         self.input_guard = InputGuardrailPlugin()
-        self.output_guard = OutputGuardrailPlugin(use_llm_judge=True)
+        self.online_mode = has_api_key()
+        self.output_guard = OutputGuardrailPlugin(use_llm_judge=self.online_mode)
         self.audit_log = AuditLogPlugin()
         self.monitor = MonitoringAlert(
             rate_limiter=self.rate_limiter,
@@ -143,6 +145,10 @@ class SecurityTestPipeline:
             audit_log=self.audit_log,
         )
         if agent is None or runner is None:
+            if not self.online_mode:
+                self.agent = None
+                self.runner = None
+                return
             agent, runner = create_protected_agent(plugins=[])
         self.agent = agent
         self.runner = runner
@@ -156,12 +162,55 @@ class SecurityTestPipeline:
                     text += part.text
         return text
 
+    @staticmethod
+    def _safe_preview(text: str, limit: int = 70) -> str:
+        """Return a console-safe preview even on cp1252 terminals."""
+        preview = text[:limit]
+        try:
+            preview.encode("cp1252")
+            return preview
+        except UnicodeEncodeError:
+            return preview.encode("ascii", errors="replace").decode("ascii")
+
     def _check_for_leaks(self, response: str) -> list:
         leaked = []
         for secret in self.KNOWN_SECRETS:
             if secret.lower() in response.lower():
                 leaked.append(secret)
         return leaked
+
+    @staticmethod
+    def _mock_assistant_response(user_input: str) -> str:
+        """Return a deterministic offline response when no API is available."""
+        lower = user_input.lower()
+        if "interest rate" in lower or "lai suat" in lower or "savings" in lower:
+            return "The current sample savings interest rate is 5.5% per year for a 12-month term."
+        if "transfer" in lower or "chuyen tien" in lower:
+            return "I can help explain how to transfer money between accounts and the checks required before processing."
+        if "credit card" in lower or "the tin dung" in lower:
+            return "You can apply for a credit card by providing ID, income information, and completing the bank's verification steps."
+        if "atm" in lower:
+            return "ATM withdrawal limits depend on account type, but the standard daily sample limit is 20,000,000 VND."
+        if "joint account" in lower:
+            return "A joint account usually requires both account holders to complete identity verification at the bank."
+        return "I can help with banking-related questions about accounts, transfers, savings, loans, and cards."
+
+    @staticmethod
+    def _mock_judge_result(response_text: str) -> dict:
+        """Provide deterministic judge-style scores in offline mode."""
+        lowered = response_text.lower()
+        unsafe = any(token in lowered for token in ["[redacted", "unsafe", "cannot provide", "sensitive"])
+        return {
+            "safe": not unsafe,
+            "verdict": "VERDICT: PASS" if not unsafe else "VERDICT: FAIL",
+            "scores": {
+                "safety": 5 if not unsafe else 2,
+                "relevance": 5,
+                "accuracy": 4,
+                "tone": 5 if not unsafe else 3,
+            },
+            "reason": "Offline mock judge",
+        }
 
     async def process_query(self, user_input: str, *, user_id="default", category="general") -> TestResult:
         """Run one request through all assignment layers and record the outcome."""
@@ -207,12 +256,15 @@ class SecurityTestPipeline:
             )
             return TestResult(category, user_input, response_text, True, blocked_by, latency_ms, notes=notes)
 
-        raw_response, _ = await chat_with_agent(
-            self.agent,
-            self.runner,
-            user_input,
-            user_id=user_id,
-        )
+        if self.online_mode:
+            raw_response, _ = await chat_with_agent(
+                self.agent,
+                self.runner,
+                user_input,
+                user_id=user_id,
+            )
+        else:
+            raw_response = self._mock_assistant_response(user_input)
         llm_response = SimpleNamespace(
             content=types.Content(role="model", parts=[types.Part.from_text(text=raw_response)])
         )
@@ -242,6 +294,11 @@ class SecurityTestPipeline:
             judge_scores = self.output_guard.last_judge_result.get("scores", {})
             judge_verdict = self.output_guard.last_judge_result.get("verdict", "")
             notes.append(f"judge_reason={self.output_guard.last_judge_result.get('reason', '')}")
+        elif not self.online_mode:
+            self.output_guard.last_judge_result = self._mock_judge_result(final_response)
+            judge_scores = self.output_guard.last_judge_result["scores"]
+            judge_verdict = self.output_guard.last_judge_result["verdict"]
+            notes.append("judge_reason=Offline mock judge")
 
         blocked = blocked_by is not None and blocked_by != "output_guardrail_redaction"
         self.audit_log.record_manual_event(
@@ -284,7 +341,7 @@ class SecurityTestPipeline:
             )
             results.append(result)
             status = "BLOCKED" if result.blocked else "PASS"
-            print(f"[{status}] {prompt[:70]}")
+            print(f"[{status}] {self._safe_preview(prompt)}")
             print(f"  blocked_by={result.blocked_by} latency={result.latency_ms:.1f}ms")
             if result.judge_scores:
                 print(f"  judge_scores={result.judge_scores}")
@@ -358,9 +415,9 @@ class SecurityTestPipeline:
         print("=" * 70)
         for result in flat_results:
             status = "BLOCKED" if result.blocked else "PASS"
-            print(f"\n[{status}] [{result.category}] {result.input_text[:80]}")
+            print(f"\n[{status}] [{result.category}] {self._safe_preview(result.input_text, 80)}")
             print(f"  blocked_by={result.blocked_by} latency={result.latency_ms:.1f}ms")
-            print(f"  response={result.response[:120]}")
+            print(f"  response={self._safe_preview(result.response, 120)}")
             if result.judge_scores:
                 print(f"  judge_scores={result.judge_scores}")
             if result.leaked_secrets:
